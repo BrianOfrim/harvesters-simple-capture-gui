@@ -1,5 +1,8 @@
+import copy
 import os
 import time
+import threading
+import typing
 import queue
 
 from absl import app, flags
@@ -11,6 +14,7 @@ from harvesters.util.pfnc import (
     rgb_formats,
     bgr_formats,
 )
+import numpy as np
 
 flags.DEFINE_string(
     "gentl_producer_path",
@@ -24,76 +28,82 @@ flags.DEFINE_float(
 
 WINDOW_NAME = "Acquire and Display"
 
+exit_event = threading.Event()
 
-def acquire_and_display_images(cam):
-    cv2.namedWindow(WINDOW_NAME)
-    cv2.moveWindow(WINDOW_NAME, 0, 0)
 
+class RetrievedImage:
+    def __init__(
+        self, width: int, height: int, data_format: str, image_data: np.ndarray
+    ):
+        self.width: int = width
+        self.height: int = height
+        self.data_format: str = data_format
+        self.image_data: np.ndarray = image_data
+        self.processed = False
+
+    def get_data(self, process: bool = False) -> np.ndarray:
+        if process:
+            self.process_image()
+        return self.image_data
+
+    def process_image(self):
+        if self.processed:
+            return
+        if self.data_format in mono_location_formats:
+            self.image_data = self.image_data.reshape(self.height, self.width)
+            self.processed = True
+        if self.data_format == "BayerRG8":
+            self.image_data = cv2.cvtColor(
+                self.image_data.reshape(self.height, self.width), cv2.COLOR_BayerRG2RGB
+            )
+            self.data_format == "RGB8"
+            self.processed = True
+        else:
+            if self.data_format in rgb_formats or self.data_format in bgr_formats:
+
+                self.image_data = self.image_data.reshape(self.height, self.width, 3)
+
+                if self.data_format in bgr_formats:
+                    # Swap every R and B:
+                    content = content[:, :, ::-1]
+                self.processed = True
+            else:
+                print("Unsupported pixel format: %s" % self.data_format)
+
+
+def acquire_images(cam, image_queue) -> None:
     cam.start_image_acquisition()
-
-    image_count = 0
-
-    while 1:
+    while not exit_event.is_set():
         with cam.fetch_buffer() as buffer:
-
-            payload = buffer.payload
-            component = payload.components[0]
+            component = buffer.payload.components[0]
             width = component.width
             height = component.height
             data_format = component.data_format
-            if image_count % 100 == 0:
-                print(
-                    "Image %i width: %i height: %i format: %s"
-                    % (image_count, width, height, data_format)
-                )
-
-            # Reshape the image so that it can be drawn on the VisPy canvas:
-            if data_format in mono_location_formats:
-                content = component.data.reshape(height, width)
-            if data_format == "BayerRG8":
-                content = cv2.cvtColor(
-                    component.data.reshape(height, width), cv2.COLOR_BayerRG2RGB
-                )
-            else:
-                # The image requires you to reshape it to draw it on the
-                # canvas:
-                if data_format in rgb_formats or data_format in bgr_formats:
-
-                    content = component.data.reshape(
-                        height,
-                        width,
-                        int(
-                            component.num_components_per_pixel
-                        ),  # Set of R, G, B, and Alpha
-                    )
-
-                    if data_format in bgr_formats:
-                        # Swap every R and B:
-                        content = content[:, :, ::-1]
-                else:
-                    print("Unsupported pixel format: %s" % data_format)
-                    break
-
-                if flags.FLAGS.display_scale_factor != 1:
-                    content = cv2.resize(
-                        content,
-                        (0, 0),
-                        fx=flags.FLAGS.display_scale_factor,
-                        fy=flags.FLAGS.display_scale_factor,
-                    )
-
-            cv2.imshow(WINDOW_NAME, content)
-            keypress = cv2.waitKey(1)
-            image_count += 1
-
-            if keypress == 27:
-                # escape key pressed
-                break
-
-    print("Number of images grabbed: %i" % image_count)
-
+            image_data = component.data.copy()
+            # only queue a new image when display thread asks for one by blocking on get
+            if image_queue.empty():
+                image_queue.put(RetrievedImage(width, height, data_format, image_data))
     cam.stop_image_acquisition()
+
+
+def display_images(image_queue) -> None:
+
+    cv2.namedWindow(WINDOW_NAME)
+    cv2.moveWindow(WINDOW_NAME, 0, 0)
+    while 1:
+        retrieved_image = image_queue.get(block=True)
+        if retrieved_image is None:
+            break
+
+        cv2.imshow(WINDOW_NAME, retrieved_image.get_data(process=True))
+        keypress = cv2.waitKey(1)
+
+        if keypress == 27:
+            # escape key pressed
+            break
+
     cv2.destroyAllWindows()
+    exit_event.set()
 
 
 def main(unused_argv):
@@ -116,7 +126,16 @@ def main(unused_argv):
 
     cam = h.create_image_acquirer(list_index=0)
 
-    acquire_and_display_images(cam)
+    image_queue = queue.Queue()
+
+    acquire_thread = threading.Thread(target=acquire_images, args=(cam, image_queue,))
+    process_thread = threading.Thread(target=display_images, args=(image_queue,))
+
+    process_thread.start()
+    acquire_thread.start()
+
+    process_thread.join()
+    acquire_thread.join()
 
     # clean up
     cam.destroy()
