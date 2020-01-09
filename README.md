@@ -1,8 +1,8 @@
-#Harvesters Simple Capture GUI
+# Harvesters Simple Capture GUI
 A simple application for acquiring and saving images using the Harvesters image acquisition library
 Harvesters Repository: https://github.com/genicam/harvesters
 
-##Getting started 
+## Getting started 
 Harvesters is a consumer that requires a genTL (GenICam Transport Layer) producer to produce images for it to consume.
 
 A good option for a GenTL producer is one supplied by Matrix Vision. To install it visit:  
