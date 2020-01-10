@@ -28,13 +28,18 @@ flags.DEFINE_integer(
 
 flags.DEFINE_integer("frame_rate", 30, "Frame rate to acquire images at.")
 
+flags.DEFINE_string("image_dir", "../images/", "The directory to save images to.")
+
+flags.DEFINE_string("image_file_type", "jpg", "File type to save images as.")
+
 WINDOW_NAME = "Acquire and Display"
-BOARDER_COLOR = (3, 252, 53)
 
 exit_event = threading.Event()
 
 
 class RetrievedImage:
+    BORDER_COLOR = (3, 252, 53)
+
     def __init__(
         self, width: int, height: int, data_format: str, image_data: np.ndarray
     ):
@@ -90,12 +95,35 @@ class RetrievedImage:
             left=bordersize,
             right=bordersize,
             borderType=cv2.BORDER_ISOLATED,
-            value=BOARDER_COLOR,
+            value=self.BORDER_COLOR,
         )
         return border
 
+    def save(self, file_path: str) -> bool:
+        try:
+            cv2.imwrite(file_path, self.get_data())
+        except:
+            return False
+        return True
 
-def acquire_images(cam, image_queue) -> None:
+
+def create_output_dir(dir_name) -> bool:
+    if not os.path.isdir(dir_name) or not os.path.exists(dir_name):
+        print("Creating output directory: %s" % dir_name)
+        try:
+            os.makedirs(dir_name)
+        except OSError:
+            print("Creation of the directory %s failed" % dir_name)
+            return False
+        else:
+            print("Successfully created the directory %s " % dir_name)
+            return True
+    else:
+        print("Output directory exists.")
+        return True
+
+
+def acquire_images(cam, image_queue: queue.Queue) -> None:
     cam.start_image_acquisition()
     while not exit_event.is_set():
         with cam.fetch_buffer() as buffer:
@@ -110,14 +138,26 @@ def acquire_images(cam, image_queue) -> None:
     cam.stop_image_acquisition()
 
 
-def display_images(image_queue) -> None:
+def save_images(save_queue: queue.Queue) -> None:
+    while True:
+        image = save_queue.get(block=True)
+        if image is None:
+            break
+        file_path = os.path.join(
+            flags.FLAGS.image_dir, "%i.%s" % (time.time(), flags.FLAGS.image_file_type)
+        )
+        image.save(file_path)
+        print
+
+
+def display_images(acquisition_queue: queue.Queue, save_queue: queue.Queue) -> None:
 
     cv2.namedWindow(WINDOW_NAME)
     cv2.moveWindow(WINDOW_NAME, 0, 0)
     try:
         while True:
 
-            retrieved_image = image_queue.get(block=True)
+            retrieved_image = acquisition_queue.get(block=True)
             if retrieved_image is None:
                 break
 
@@ -143,10 +183,12 @@ def display_images(image_queue) -> None:
                     WINDOW_NAME,
                     retrieved_image.get_highlighted_image(flags.FLAGS.display_width),
                 )
+                save_queue.put(retrieved_image)
                 cv2.waitKey(500)
     finally:
         cv2.destroyAllWindows()
         exit_event.set()
+        save_queue.put(None)
 
 
 def apply_camera_settings(cam) -> None:
@@ -155,6 +197,11 @@ def apply_camera_settings(cam) -> None:
 
 
 def main(unused_argv):
+
+    if not create_output_dir(flags.FLAGS.image_dir):
+        print("Cannot create output annotations directory.")
+        return
+
     h = Harvester()
     h.add_cti_file(flags.FLAGS.gentl_producer_path)
     if len(h.cti_files) == 0:
@@ -176,16 +223,28 @@ def main(unused_argv):
 
     apply_camera_settings(cam)
 
-    image_queue = queue.Queue()
+    acquisition_queue = queue.Queue()
+    save_queue = queue.Queue()
 
-    acquire_thread = threading.Thread(target=acquire_images, args=(cam, image_queue,))
-    process_thread = threading.Thread(target=display_images, args=(image_queue,))
+    acquire_thread = threading.Thread(
+        target=acquire_images, args=(cam, acquisition_queue,)
+    )
+    process_thread = threading.Thread(
+        target=display_images, args=(acquisition_queue, save_queue,)
+    )
+    save_thread = threading.Thread(target=save_images, args=(save_queue,))
 
+    save_thread.start()
     process_thread.start()
     acquire_thread.start()
+    print("Acquisition Started.")
 
     process_thread.join()
     acquire_thread.join()
+    print("Acquisition Complete.")
+
+    save_thread.join()
+    print("Saving Complete.")
 
     # clean up
     cam.destroy()
