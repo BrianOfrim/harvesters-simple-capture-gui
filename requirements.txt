@@ -9,8 +9,15 @@
 --trusted-host files.pythonhosted.org
 
 absl-py==0.9.0
+boto3==1.11.0
+botocore==1.14.0          # via boto3, s3transfer
+docutils==0.15.2          # via botocore
 genicam==1.0.0            # via harvesters
 harvesters==1.0.1
+jmespath==0.9.4           # via boto3, botocore
 numpy==1.18.1
 opencv-python==4.1.2.30
-six==1.13.0               # via absl-py
+python-dateutil==2.8.1    # via botocore
+s3transfer==0.3.0         # via boto3
+six==1.13.0               # via absl-py, python-dateutil
+urllib3==1.25.7           # via botocore

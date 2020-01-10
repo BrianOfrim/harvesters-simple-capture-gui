@@ -16,6 +16,8 @@ from harvesters.util.pfnc import (
 )
 import numpy as np
 
+import s3_util
+
 flags.DEFINE_string(
     "gentl_producer_path",
     "/opt/mvIMPACT_Acquire/lib/x86_64/mvGenTLProducer.cti",
@@ -32,12 +34,16 @@ flags.DEFINE_string("image_dir", "../images/", "The directory to save images to.
 
 flags.DEFINE_string("image_file_type", "jpg", "File type to save images as.")
 
-WINDOW_NAME = "Acquire and Display"
 
+flags.DEFINE_string("s3_bucket_name", None, "S3 bucket to send images to.")
+
+flags.DEFINE_string("s3_image_dir", "data/images/", "Prefix of the s3 image objects.")
+
+WINDOW_NAME = "Acquire and Display"
 exit_event = threading.Event()
 
 
-class RetrievedImage:
+class AcquiredImage:
     BORDER_COLOR = (3, 252, 53)
 
     def __init__(
@@ -125,29 +131,44 @@ def create_output_dir(dir_name) -> bool:
 
 def acquire_images(cam, image_queue: queue.Queue) -> None:
     cam.start_image_acquisition()
-    while not exit_event.is_set():
-        with cam.fetch_buffer() as buffer:
-            # only queue a new image when display thread asks for one by blocking on get
-            if image_queue.empty():
-                component = buffer.payload.components[0]
-                width = component.width
-                height = component.height
-                data_format = component.data_format
-                image_data = component.data.copy()
-                image_queue.put(RetrievedImage(width, height, data_format, image_data))
-    cam.stop_image_acquisition()
+    print("Acquisition started.")
+    try:
+        while not exit_event.is_set():
+            with cam.fetch_buffer() as buffer:
+                # only queue a new image when display thread asks for one by blocking on get
+                if image_queue.empty():
+                    component = buffer.payload.components[0]
+                    width = component.width
+                    height = component.height
+                    data_format = component.data_format
+                    image_data = component.data.copy()
+                    image_queue.put(
+                        AcquiredImage(width, height, data_format, image_data)
+                    )
+    finally:
+        cam.stop_image_acquisition()
+        print("Acquisition Ended.")
 
 
-def save_images(save_queue: queue.Queue) -> None:
-    while True:
-        image = save_queue.get(block=True)
-        if image is None:
-            break
-        file_path = os.path.join(
-            flags.FLAGS.image_dir, "%i.%s" % (time.time(), flags.FLAGS.image_file_type)
-        )
-        image.save(file_path)
-        print
+def save_images(save_queue: queue.Queue, use_s3: bool) -> None:
+    try:
+        while True:
+            image = save_queue.get(block=True)
+            if image is None:
+                break
+            file_path = os.path.join(
+                flags.FLAGS.image_dir,
+                "%i.%s" % (time.time(), flags.FLAGS.image_file_type),
+            )
+            save_successfull = image.save(file_path)
+            print("Image saved at: %s" % file_path)
+
+            if use_s3 and save_successfull:
+                s3_util.upload_files(
+                    flags.FLAGS.s3_bucket_name, [file_path], flags.FLAGS.s3_image_dir,
+                )
+    finally:
+        print("Saving complete.")
 
 
 def display_images(acquisition_queue: queue.Queue, save_queue: queue.Queue) -> None:
@@ -202,6 +223,21 @@ def main(unused_argv):
         print("Cannot create output annotations directory.")
         return
 
+    use_s3 = True if flags.FLAGS.s3_bucket_name is not None else False
+
+    if use_s3:
+        if not s3_util.s3_bucket_exists(flags.FLAGS.s3_bucket_name):
+            use_s3 = False
+            print(
+                "Bucket: %s either does not exist or you do not have access to it"
+                % flags.FLAGS.s3_bucket_name
+            )
+        else:
+            print(
+                "Bucket: %s exists and you have access to it"
+                % flags.FLAGS.s3_bucket_name
+            )
+
     h = Harvester()
     h.add_cti_file(flags.FLAGS.gentl_producer_path)
     if len(h.cti_files) == 0:
@@ -232,23 +268,21 @@ def main(unused_argv):
     process_thread = threading.Thread(
         target=display_images, args=(acquisition_queue, save_queue,)
     )
-    save_thread = threading.Thread(target=save_images, args=(save_queue,))
+    save_thread = threading.Thread(target=save_images, args=(save_queue, use_s3,))
 
     save_thread.start()
     process_thread.start()
     acquire_thread.start()
-    print("Acquisition Started.")
 
     process_thread.join()
     acquire_thread.join()
-    print("Acquisition Complete.")
-
     save_thread.join()
-    print("Saving Complete.")
 
     # clean up
     cam.destroy()
     h.reset()
+
+    print("Exiting.")
 
 
 if __name__ == "__main__":
