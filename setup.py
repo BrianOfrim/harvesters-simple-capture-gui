@@ -8,7 +8,7 @@ setuptools.setup(
     version="0.0.1",
     author="Brian Ofrim",
     author_email="bofrim@ualberta.ca",
-    description="A simple image acquisition, display and saving tool build with harvesters",
+    description="A simple image acquisition, display, and saving tool build with harvesters",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/BrianOfrim/harvesters-simple-capture-gui",
