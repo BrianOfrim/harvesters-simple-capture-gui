@@ -25,7 +25,7 @@ flags.DEFINE_string(
 )
 
 flags.DEFINE_integer(
-    "display_width", 640, "Target image width for the display window.",
+    "display_width", 1080, "Target image width for the display window.",
 )
 
 flags.DEFINE_integer("frame_rate", 30, "Frame rate to acquire images at.")
@@ -45,6 +45,7 @@ exit_event = threading.Event()
 
 class AcquiredImage:
     BORDER_COLOR = (3, 252, 53)
+    BORDER_WIDTH = 10
 
     def __init__(
         self, width: int, height: int, data_format: str, image_data: np.ndarray
@@ -89,21 +90,22 @@ class AcquiredImage:
         return cv2.resize(self.image_data, (0, 0), fx=resize_ratio, fy=resize_ratio)
 
     def get_highlighted_image(self, target_width: int = None) -> np.ndarray:
-        bordersize = 10
-        border = cv2.copyMakeBorder(
+        return cv2.copyMakeBorder(
             (
                 self.get_resized_image(target_width)
                 if target_width is not None
                 else self.get_data()
-            )[bordersize:-bordersize, bordersize:-bordersize],
-            top=bordersize,
-            bottom=bordersize,
-            left=bordersize,
-            right=bordersize,
+            )[
+                self.BORDER_WIDTH : -self.BORDER_WIDTH,
+                self.BORDER_WIDTH : -self.BORDER_WIDTH,
+            ],
+            top=self.BORDER_WIDTH,
+            bottom=self.BORDER_WIDTH,
+            left=self.BORDER_WIDTH,
+            right=self.BORDER_WIDTH,
             borderType=cv2.BORDER_ISOLATED,
             value=self.BORDER_COLOR,
         )
-        return border
 
     def save(self, file_path: str) -> bool:
         try:
@@ -132,22 +134,22 @@ def create_output_dir(dir_name) -> bool:
 def acquire_images(cam, image_queue: queue.Queue) -> None:
     cam.start_image_acquisition()
     print("Acquisition started.")
-    try:
-        while not exit_event.is_set():
-            with cam.fetch_buffer() as buffer:
-                # only queue a new image when display thread asks for one by blocking on get
-                if image_queue.empty():
-                    component = buffer.payload.components[0]
-                    width = component.width
-                    height = component.height
-                    data_format = component.data_format
-                    image_data = component.data.copy()
-                    image_queue.put(
-                        AcquiredImage(width, height, data_format, image_data)
-                    )
-    finally:
-        cam.stop_image_acquisition()
-        print("Acquisition Ended.")
+    while not exit_event.is_set():
+        with cam.fetch_buffer() as buffer:
+            component = buffer.payload.components[0]
+            width = component.width
+            height = component.height
+            data_format = component.data_format
+            image_data = component.data.copy()
+            # clear stale image
+            try:
+                image_queue.get_nowait()
+            except queue.Empty:
+                pass
+            # queue newest image
+            image_queue.put(AcquiredImage(width, height, data_format, image_data))
+    cam.stop_image_acquisition()
+    print("Acquisition Ended.")
 
 
 def save_images(save_queue: queue.Queue, use_s3: bool) -> None:
@@ -213,8 +215,14 @@ def display_images(acquisition_queue: queue.Queue, save_queue: queue.Queue) -> N
 
 
 def apply_camera_settings(cam) -> None:
-    cam.remote_device.node_map.AcquisitionFrameRateEnable = True
-    cam.remote_device.node_map.AcquisitionFrameRate = flags.FLAGS.frame_rate
+    cam.remote_device.node_map.AcquisitionFrameRateEnable.value = True
+    cam.remote_device.node_map.AcquisitionFrameRate.value = min(
+        flags.FLAGS.frame_rate, cam.remote_device.node_map.AcquisitionFrameRate.max
+    )
+    print(
+        "Acquisition frame rate set to: %3.1f"
+        % cam.remote_device.node_map.AcquisitionFrameRate.value
+    )
 
 
 def main(unused_argv):
@@ -259,7 +267,8 @@ def main(unused_argv):
 
     apply_camera_settings(cam)
 
-    acquisition_queue = queue.Queue()
+    # Newest only single image queue
+    acquisition_queue = queue.Queue(1)
     save_queue = queue.Queue()
 
     acquire_thread = threading.Thread(
