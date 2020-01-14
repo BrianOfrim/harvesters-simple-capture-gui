@@ -30,7 +30,7 @@ flags.DEFINE_integer(
 
 flags.DEFINE_integer("frame_rate", 30, "Frame rate to acquire images at.")
 
-flags.DEFINE_string("image_dir", "../images/", "The directory to save images to.")
+flags.DEFINE_string("image_dir", "../images", "The directory to save images to.")
 
 flags.DEFINE_string("image_file_type", "jpg", "File type to save images as.")
 
