@@ -37,7 +37,7 @@ flags.DEFINE_string("image_file_type", "jpg", "File type to save images as.")
 
 flags.DEFINE_string("s3_bucket_name", None, "S3 bucket to send images to.")
 
-flags.DEFINE_string("s3_image_dir", "data/images/", "Prefix of the s3 image objects.")
+flags.DEFINE_string("s3_image_dir", "data/images", "Prefix of the s3 image objects.")
 
 WINDOW_NAME = "Acquire and Display"
 exit_event = threading.Event()
