@@ -63,29 +63,28 @@ class RGB8Image:
         return self.image_data
 
     def _process_image(self, image_data, data_format, width, height) -> np.ndarray:
-        # Convert to BGR (on purpose) for matplot lib
         if data_format == "Mono8":
-            return cv2.cvtColor(image_data.reshape(height, width), cv2.COLOR_GRAY2BGR)
+            return cv2.cvtColor(image_data.reshape(height, width), cv2.COLOR_GRAY2RGB)
         elif data_format == "BayerRG8":
             return cv2.cvtColor(
-                image_data.reshape(height, width), cv2.COLOR_BayerRG2BGR
+                image_data.reshape(height, width), cv2.COLOR_BayerRG2RGB
             )
         elif data_format == "BayerGR8":
             return cv2.cvtColor(
-                image_data.reshape(height, width), cv2.COLOR_BayerGR2BGR
+                image_data.reshape(height, width), cv2.COLOR_BayerGR2RGB
             )
         elif data_format == "BayerGB8":
             return cv2.cvtColor(
-                image_data.reshape(height, width), cv2.COLOR_BayerGB2BGR
+                image_data.reshape(height, width), cv2.COLOR_BayerGB2RGB
             )
         elif data_format == "BayerBG8":
             return cv2.cvtColor(
-                image_data.reshape(height, width), cv2.COLOR_BayerBG2BGR
+                image_data.reshape(height, width), cv2.COLOR_BayerBG2RGB
             )
         elif data_format == "RGB8":
-            return cv2.cvtColor(image_data.reshape(height, width, 3), cv2.COLOR_BGR2RGB)
-        elif data_format == "BGR8":
             return image_data.reshape(height, width, 3)
+        elif data_format == "BGR8":
+            return cv2.cvtColor(image_data.reshape(height, width, 3), cv2.COLOR_BGR2RGB)
         else:
             print("Unsupported pixel format: %s" % data_format)
             raise ValueError("Unsupported pixel format: %s" % data_format)
