@@ -7,16 +7,13 @@ import queue
 
 from absl import app, flags
 from cv2 import cv2
+from genicam.gentl import TimeoutException
 from harvesters.core import Harvester
-from harvesters.util.pfnc import (
-    mono_location_formats,
-    bayer_location_formats,
-    rgb_formats,
-    bgr_formats,
-)
 import numpy as np
 
 import s3_util
+
+WINDOW_NAME = "Capture"
 
 flags.DEFINE_string(
     "gentl_producer_path",
@@ -39,54 +36,62 @@ flags.DEFINE_string("s3_bucket_name", None, "S3 bucket to send images to.")
 
 flags.DEFINE_string("s3_image_dir", "data/images", "Prefix of the s3 image objects.")
 
-WINDOW_NAME = "Acquire and Display"
-exit_event = threading.Event()
 
-
-class AcquiredImage:
+class RGB8Image:
     BORDER_COLOR = (3, 252, 53)
     BORDER_WIDTH = 10
 
     def __init__(
         self, width: int, height: int, data_format: str, image_data: np.ndarray
     ):
-        self.width: int = width
-        self.height: int = height
-        self.data_format: str = data_format
-        self.image_data: np.ndarray = image_data
-        self.processed = False
+        self.image_data: np.ndarray = self._process_image(
+            image_data, data_format, width, height
+        )
 
-    def get_data(self, process: bool = False) -> np.ndarray:
-        if process:
-            self.process_image()
+    def get_height(self):
+        return self.image_data.shape[0]
+
+    def get_width(self):
+        return self.image_data.shape[1]
+
+    def get_channels(self):
+        if len(self.image_data.shape) < 3:
+            return 1
+        return self.image_data.shape[2]
+
+    def get_data(self) -> np.ndarray:
         return self.image_data
 
-    def process_image(self) -> None:
-        if self.processed:
-            return
-
-        if self.data_format in mono_location_formats:
-            self.image_data = self.image_data.reshape(self.height, self.width)
-            self.processed = True
-        elif self.data_format == "BayerRG8":
-            self.image_data = cv2.cvtColor(
-                self.image_data.reshape(self.height, self.width), cv2.COLOR_BayerRG2RGB
+    def _process_image(self, image_data, data_format, width, height) -> np.ndarray:
+        # Convert to BGR (on purpose) for matplot lib
+        if data_format == "Mono8":
+            return cv2.cvtColor(image_data.reshape(height, width), cv2.COLOR_GRAY2BGR)
+        elif data_format == "BayerRG8":
+            return cv2.cvtColor(
+                image_data.reshape(height, width), cv2.COLOR_BayerRG2BGR
             )
-            self.data_format == "RGB8"
-            self.processed = True
-        elif self.data_format in rgb_formats or self.data_format in bgr_formats:
-
-            self.image_data = self.image_data.reshape(self.height, self.width, 3)
-
-            if self.data_format in bgr_formats:
-                # Swap every R and B:
-                content = content[:, :, ::-1]
-            self.processed = True
+        elif data_format == "BayerGR8":
+            return cv2.cvtColor(
+                image_data.reshape(height, width), cv2.COLOR_BayerGR2BGR
+            )
+        elif data_format == "BayerGB8":
+            return cv2.cvtColor(
+                image_data.reshape(height, width), cv2.COLOR_BayerGB2BGR
+            )
+        elif data_format == "BayerBG8":
+            return cv2.cvtColor(
+                image_data.reshape(height, width), cv2.COLOR_BayerBG2BGR
+            )
+        elif data_format == "RGB8":
+            return cv2.cvtColor(image_data.reshape(height, width, 3), cv2.COLOR_BGR2RGB)
+        elif data_format == "BGR8":
+            return image_data.reshape(height, width, 3)
         else:
-            print("Unsupported pixel format: %s" % self.data_format)
+            print("Unsupported pixel format: %s" % data_format)
+            raise ValueError("Unsupported pixel format: %s" % data_format)
 
     def get_resized_image(self, target_width: int) -> np.ndarray:
-        resize_ratio = float(target_width / self.width)
+        resize_ratio = float(target_width / self.get_width())
         return cv2.resize(self.image_data, (0, 0), fx=resize_ratio, fy=resize_ratio)
 
     def get_highlighted_image(self, target_width: int = None) -> np.ndarray:
@@ -110,46 +115,67 @@ class AcquiredImage:
     def save(self, file_path: str) -> bool:
         try:
             cv2.imwrite(file_path, self.get_data())
-        except:
+        except FileExistsError:
             return False
         return True
 
 
-def create_output_dir(dir_name) -> bool:
-    if not os.path.isdir(dir_name) or not os.path.exists(dir_name):
-        print("Creating output directory: %s" % dir_name)
-        try:
-            os.makedirs(dir_name)
-        except OSError:
-            print("Creation of the directory %s failed" % dir_name)
-            return False
-        else:
-            print("Successfully created the directory %s " % dir_name)
-            return True
-    else:
-        print("Output directory exists.")
-        return True
-
-
-def acquire_images(cam, image_queue: queue.Queue) -> None:
-    cam.start_image_acquisition()
-    print("Acquisition started.")
-    while not exit_event.is_set():
+def get_newest_image(cam):
+    try:
+        retrieved_image = None
         with cam.fetch_buffer() as buffer:
             component = buffer.payload.components[0]
-            width = component.width
-            height = component.height
-            data_format = component.data_format
-            image_data = component.data.copy()
-            # clear stale image
-            try:
-                image_queue.get_nowait()
-            except queue.Empty:
-                pass
-            # queue newest image
-            image_queue.put(AcquiredImage(width, height, data_format, image_data))
-    cam.stop_image_acquisition()
-    print("Acquisition Ended.")
+            retrieved_image = RGB8Image(
+                component.width,
+                component.height,
+                component.data_format,
+                component.data.copy(),
+            )
+        return retrieved_image
+    except TimeoutException:
+        print("Timeout ocurred waiting for image.")
+        return None
+    except ValueError as err:
+        print(err)
+        return None
+
+
+def acquire_images(cam, save_queue: queue.Queue) -> None:
+    cv2.namedWindow(WINDOW_NAME)
+    cv2.moveWindow(WINDOW_NAME, 0, 0)
+    try:
+        cam.start_image_acquisition()
+        print("Acquisition started.")
+        while True:
+            retrieved_image = get_newest_image(cam)
+            if retrieved_image is None:
+                break
+
+            cv2.imshow(
+                WINDOW_NAME,
+                retrieved_image.get_resized_image(flags.FLAGS.display_width),
+            )
+            keypress = cv2.waitKey(1)
+
+            if keypress == 27:
+                # escape key pressed
+                break
+            elif cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                # x button clicked
+                break
+            elif keypress == 13:
+                # Enter key pressed
+                cv2.imshow(
+                    WINDOW_NAME,
+                    retrieved_image.get_highlighted_image(flags.FLAGS.display_width),
+                )
+                save_queue.put(retrieved_image)
+                cv2.waitKey(500)
+    finally:
+        save_queue.put(None)
+        cv2.destroyWindow(WINDOW_NAME)
+        cam.stop_image_acquisition()
+        print("Acquisition Ended.")
 
 
 def save_images(save_queue: queue.Queue, use_s3: bool) -> None:
@@ -173,48 +199,12 @@ def save_images(save_queue: queue.Queue, use_s3: bool) -> None:
         print("Saving complete.")
 
 
-def display_images(acquisition_queue: queue.Queue, save_queue: queue.Queue) -> None:
-
-    cv2.namedWindow(WINDOW_NAME)
-    cv2.moveWindow(WINDOW_NAME, 0, 0)
-    try:
-        while True:
-
-            retrieved_image = acquisition_queue.get(block=True)
-            if retrieved_image is None:
-                break
-
-            retrieved_image.process_image()
-
-            # copy the image for modification and display
-            display_image_data = retrieved_image.get_resized_image(
-                flags.FLAGS.display_width
-            )
-
-            cv2.imshow(WINDOW_NAME, display_image_data)
-            keypress = cv2.waitKey(1)
-
-            if keypress == 27:
-                # escape key pressed
-                break
-            elif cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-                # x button clicked
-                break
-            elif keypress == 13:
-                # Enter key pressed
-                cv2.imshow(
-                    WINDOW_NAME,
-                    retrieved_image.get_highlighted_image(flags.FLAGS.display_width),
-                )
-                save_queue.put(retrieved_image)
-                cv2.waitKey(500)
-    finally:
-        cv2.destroyAllWindows()
-        exit_event.set()
-        save_queue.put(None)
-
-
 def apply_camera_settings(cam) -> None:
+    # Configure newest only buffer handling
+    cam.keep_latest = True
+    cam.num_filled_buffers_to_hold = 1
+
+    # Configure frame rate
     cam.remote_device.node_map.AcquisitionFrameRateEnable.value = True
     cam.remote_device.node_map.AcquisitionFrameRate.value = min(
         flags.FLAGS.frame_rate, cam.remote_device.node_map.AcquisitionFrameRate.max
@@ -223,6 +213,22 @@ def apply_camera_settings(cam) -> None:
         "Acquisition frame rate set to: %3.1f"
         % cam.remote_device.node_map.AcquisitionFrameRate.value
     )
+
+
+def create_output_dir(dir_name) -> bool:
+    if not os.path.isdir(dir_name) or not os.path.exists(dir_name):
+        print("Creating output directory: %s" % dir_name)
+        try:
+            os.makedirs(dir_name)
+        except OSError:
+            print("Creation of the directory %s failed" % dir_name)
+            return False
+        else:
+            print("Successfully created the directory %s " % dir_name)
+            return True
+    else:
+        print("Output directory exists.")
+        return True
 
 
 def main(unused_argv):
@@ -267,24 +273,14 @@ def main(unused_argv):
 
     apply_camera_settings(cam)
 
-    # Newest only single image queue
-    acquisition_queue = queue.Queue(1)
     save_queue = queue.Queue()
 
-    acquire_thread = threading.Thread(
-        target=acquire_images, args=(cam, acquisition_queue,)
-    )
-    process_thread = threading.Thread(
-        target=display_images, args=(acquisition_queue, save_queue,)
-    )
     save_thread = threading.Thread(target=save_images, args=(save_queue, use_s3,))
 
     save_thread.start()
-    process_thread.start()
-    acquire_thread.start()
 
-    process_thread.join()
-    acquire_thread.join()
+    acquire_images(cam, save_queue)
+
     save_thread.join()
 
     # clean up
