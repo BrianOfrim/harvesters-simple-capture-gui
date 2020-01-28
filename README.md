@@ -1,4 +1,7 @@
 # Harvesters Simple Capture GUI
+
+**This project is now deprecated, it's functionality has been added to https://github.com/BrianOfrim/boja**
+
 A simple application for acquiring and saving images using the Harvesters image acquisition library
 Harvesters Repository: https://github.com/genicam/harvesters
 
